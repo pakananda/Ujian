@@ -182,6 +182,14 @@
     .ujian-card { transition: border-color .15s, transform .2s, box-shadow .2s; }
     .ujian-card:hover { border-color: var(--indigo); transform: translateY(-5px) rotate(-.6deg); box-shadow: 0 18px 36px rgba(79,70,229,.2); }
 
+    /* Soal diburamkan seketika saat jendela kehilangan fokus (menggagalkan alat tangkap layar) */
+    body.kabur #area-kuis { filter: blur(30px) !important; transition: none !important; pointer-events: none; }
+    body.kabur::before { content: "🔒 Kembali ke jendela ujian untuk melihat soal"; position: fixed; inset: 0; z-index: 9500; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; font-weight: 700; font-size: 1.2rem; color: #312e81; background: rgba(238,242,255,.6); background-image: none; -webkit-mask-image: none; mask-image: none; }
+
+    /* Kedip merah saat pelanggaran */
+    body.flash-alarm::after { content:""; position:fixed; inset:0; z-index:10003; pointer-events:none; background:rgba(220,38,38,.55); animation: alarm .6s ease-in-out 4; }
+    @keyframes alarm { 0%,100% { opacity: 0; } 50% { opacity: 1; } }
+
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   </style>
 </head>
@@ -283,6 +291,15 @@
       <div class="alert alert-warning border-0 bg-warning bg-opacity-10 text-dark mt-4 mb-0" role="alert">
         <strong>⚠️ Aturan &amp; Sistem Keamanan Ujian</strong>
         <ul class="mb-0 ps-3 mt-1 small rule-list" id="daftarAturan"></ul>
+      </div>
+      <div class="border rounded-3 p-3 mt-4 bg-light">
+        <div class="fw-bold mb-1">🔊 Tes Suara (wajib)</div>
+        <p class="small text-secondary mb-2">Sistem akan membunyikan alarm saat terjadi pelanggaran. Nyalakan speaker/volume laptop (jangan di-mute), lalu tekan tombol di bawah dan pastikan Anda mendengar bunyinya.</p>
+        <button type="button" class="btn btn-outline-primary fw-bold btn-sm" id="btnTesSuara">▶ Putar Tes Suara</button>
+        <div class="form-check mt-2">
+          <input class="form-check-input" type="checkbox" id="cekSuara" disabled>
+          <label class="form-check-label small fw-semibold" for="cekSuara">Saya mendengar bunyinya dengan jelas</label>
+        </div>
       </div>
       <button class="btn btn-primary text-white mt-4 w-100 py-2.5 fw-bold fs-5 shadow-sm" id="btnMulai">Mulai Kerjakan Ujian 🚀</button>
     </div>
@@ -408,6 +425,91 @@
     fs: false, wl: null
   };
   let modalObj = null, toastTimer = null;
+
+  // ---------- Bunyi peringatan pelanggaran ----------
+  // Pengaturan bunyi (ubah sesuai selera)
+  const BEEP = {
+    JUMLAH: 2,        // berapa kali berbunyi
+    DURASI: 0.9,      // lama tiap bunyi (detik)
+    JEDA: 0.3,        // jeda antar bunyi (detik)
+    VOLUME: 0.9,      // 0 - 1
+    NADA_A: 880,      // Hz, nada tinggi
+    NADA_B: 660       // Hz, nada rendah (bergantian = lebih menarik perhatian)
+  };
+  let audioCtx = null, keepOsc = null, titleTimer = null;
+
+  // Dipanggil dari klik tombol (browser mewajibkan interaksi pengguna)
+  function aktifkanAudio() {
+    try {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx.addEventListener("statechange", () => { if (audioCtx.state === "suspended" && S.aktif) audioCtx.resume().catch(() => {}); });
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      mulaiKeepAlive();
+    } catch (e) {}
+  }
+
+  // Nada hampir senyap yang terus berjalan: menjaga mesin audio & perangkat output
+  // (speaker Bluetooth/HDMI) tetap "bangun" sehingga bunyi pertama tidak tertelan.
+  function mulaiKeepAlive() {
+    if (!audioCtx || keepOsc) return;
+    try {
+      keepOsc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      keepOsc.frequency.value = 40;
+      g.gain.value = 0.0005;
+      keepOsc.connect(g); g.connect(audioCtx.destination);
+      keepOsc.start();
+    } catch (e) { keepOsc = null; }
+  }
+  function hentikanKeepAlive() {
+    try { if (keepOsc) keepOsc.stop(); } catch (e) {}
+    keepOsc = null;
+  }
+
+  // Bunyi panjang berulang. Dijadwalkan lewat jam audio (bukan setTimeout)
+  // agar tetap tepat waktu walau siswa sedang di tab lain.
+  function beepDuaKali() {
+    kedipPeringatan();
+    try { if (navigator.vibrate) navigator.vibrate([400, 150, 400]); } catch (e) {}
+    if (!audioCtx) return;
+    try {
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const t0 = audioCtx.currentTime + 0.05;
+      for (let n = 0; n < BEEP.JUMLAH; n++) {
+        const mulai = t0 + n * (BEEP.DURASI + BEEP.JEDA);
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "square";
+        // nada bergantian tinggi-rendah seperti sirene pendek
+        const setengah = BEEP.DURASI / 2;
+        osc.frequency.setValueAtTime(BEEP.NADA_A, mulai);
+        osc.frequency.setValueAtTime(BEEP.NADA_B, mulai + setengah);
+        gain.gain.setValueAtTime(0.0001, mulai);
+        gain.gain.exponentialRampToValueAtTime(BEEP.VOLUME, mulai + 0.03);
+        gain.gain.setValueAtTime(BEEP.VOLUME, mulai + BEEP.DURASI - 0.08);
+        gain.gain.exponentialRampToValueAtTime(0.0001, mulai + BEEP.DURASI);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(mulai); osc.stop(mulai + BEEP.DURASI + 0.02);
+      }
+    } catch (e) {}
+  }
+
+  // Cadangan visual: layar berkedip merah + judul tab berkedip
+  function kedipPeringatan() {
+    try {
+      document.body.classList.remove("flash-alarm"); void document.body.offsetWidth;
+      document.body.classList.add("flash-alarm");
+      setTimeout(() => document.body.classList.remove("flash-alarm"), 2400);
+      clearInterval(titleTimer);
+      const asli = document.title; let k = 0;
+      titleTimer = setInterval(() => {
+        document.title = (k++ % 2 === 0) ? "⚠️ KEMBALI KE UJIAN!" : asli;
+        if (k > 10) { clearInterval(titleTimer); document.title = asli; }
+      }, 500);
+    } catch (e) {}
+  }
 
   // ---------- UI dasar ----------
   function tampilLoading(t) { $("loadingText").textContent = t || "Memuat…"; $("loading").style.display = "flex"; }
@@ -634,6 +736,8 @@
     const nama = $("inputNama").value.trim(), kelas = $("inputKelas").value, absen = $("inputAbsen").value.trim(), kode = $("inputKode").value.trim();
     if (!nama || !kelas || !absen) { await modalOk("Data belum lengkap", "Isi kelas, nama, dan nomor absen terlebih dahulu."); return; }
 
+    aktifkanAudio();   // izinkan suara (harus dari klik tombol)
+    if (!$("cekSuara").checked) { await modalOk("Tes suara belum dilakukan", "Tekan <strong>Putar Tes Suara</strong>, pastikan speaker menyala dan bunyi terdengar, lalu centang pernyataan di bawahnya."); return; }
     const fsP = masukFullscreen();
     tampilLoading("Memverifikasi data dan menyiapkan soal…");
     try {
@@ -659,6 +763,7 @@
     $("dispMapel").textContent = res.mapel || (S.info && S.info.mapel) || "";
     $("dispNama").textContent = res.nama; $("dispKelas").textContent = res.kelas;
     document.body.classList.add("mode-ujian");
+    pasangWatermark(res.nama, res.kelas, res.absen);
     $("form-identitas").style.display = "none"; $("area-kuis").style.display = "block";
     $("pelanggaranCount").textContent = "Pelanggaran: " + S.pelanggaran + "/" + S.maks;
 
@@ -672,6 +777,7 @@
     window.scrollTo({ top: 0 });
 
     if (res.lanjut) {
+      beepDuaKali();   // bunyi juga saat halaman dimuat ulang (dihitung 1 pelanggaran)
       await modalOk("Sesi dilanjutkan", "Jawaban terakhir yang tersimpan telah dipulihkan. Waktu tetap berjalan sejak mulai pertama, dan memuat ulang halaman dicatat sebagai 1 pelanggaran.");
     }
   }
@@ -892,6 +998,7 @@
     if (now - S.lastViolation < 2000) return;
     S.lastViolation = now;
     S.pelanggaran++;
+    beepDuaKali();   // alarm: bunyi + kedip layar
     $("pelanggaranCount").textContent = "Pelanggaran: " + S.pelanggaran + "/" + S.maks;
     const b = $("warningBanner");
     b.textContent = "⚠️ PERINGATAN: Anda meninggalkan halaman Ujian! Pelanggaran " + S.pelanggaran + " dari " + S.maks + " telah dicatat. Pada batas maksimum, Ujian dikirim otomatis.";
@@ -948,6 +1055,8 @@
 
   // ---------- Hasil ----------
   function tampilHasil(h) {
+    hapusWatermark(); document.body.classList.remove("kabur");
+    hentikanKeepAlive();
     keluarFullscreen();
     S.aktif = false; S.mengirim = false;
     clearInterval(S.timer); clearTimeout(S.cekTimer); clearTimeout(S.saveTimer); clearTimeout(blurTimer);
@@ -984,6 +1093,51 @@
       $("hasilCatatan").textContent = "Jawaban Anda telah tersimpan. Nilai akan diumumkan oleh guru.";
     }
   }
+
+  // ---------- Anti-Screenshot ----------
+  // 1) Watermark identitas siswa di seluruh layar soal (melacak sumber kebocoran)
+  let wmObserver = null;
+  function pasangWatermark(nama, kelas, absen) {
+    hapusWatermark();
+    const teks = nama + " • " + kelas + " • No." + absen;
+    const tgl = new Date().toLocaleDateString("id-ID");
+    const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='340' height='200'>" +
+      "<g transform='rotate(-25 170 100)' font-family='Arial,sans-serif' font-weight='700' font-size='15' fill='rgba(15,23,42,0.13)' text-anchor='middle'>" +
+      "<text x='170' y='95'>" + esc(teks) + "</text><text x='170' y='118'>" + esc(tgl) + "</text></g></svg>";
+    const el = document.createElement("div");
+    el.id = "wm-ujian";
+    el.style.cssText = "position:fixed;inset:0;z-index:9000;pointer-events:none;background-image:url(\"data:image/svg+xml," + encodeURIComponent(svg) + "\");background-repeat:repeat;";
+    document.body.appendChild(el);
+    // Jika elemen dihapus/diubah lewat DevTools, pasang kembali
+    wmObserver = new MutationObserver(() => {
+      if (S.aktif && !document.getElementById("wm-ujian")) pasangWatermark(nama, kelas, absen);
+    });
+    wmObserver.observe(document.body, { childList: true });
+  }
+  function hapusWatermark() {
+    if (wmObserver) { wmObserver.disconnect(); wmObserver = null; }
+    const el = document.getElementById("wm-ujian"); if (el) el.remove();
+  }
+
+  // 2) Deteksi tombol tangkap layar: PrintScreen, Win+Shift+S, Cmd+Shift+3/4/5
+  function cekTombolScreenshot(e) {
+    if (!S.aktif) return;
+    const k = (e.key || "").toLowerCase();
+    const win = e.metaKey && e.shiftKey && k === "s";
+    const mac = e.metaKey && e.shiftKey && ["Digit3", "Digit4", "Digit5"].includes(e.code);
+    if (k === "printscreen" || e.code === "PrintScreen" || win || mac) {
+      try { navigator.clipboard.writeText(" "); } catch (err) {}   // timpa isi clipboard
+      laporPelanggaran("SCREENSHOT");
+    }
+  }
+  document.addEventListener("keydown", cekTombolScreenshot);
+  document.addEventListener("keyup", cekTombolScreenshot);
+
+  // 3) Soal langsung buram saat jendela kehilangan fokus / tab tersembunyi
+  function kaburkan(on) { document.body.classList.toggle("kabur", !!on && S.aktif); }
+  window.addEventListener("blur", () => kaburkan(true));
+  window.addEventListener("focus", () => kaburkan(false));
+  document.addEventListener("visibilitychange", () => kaburkan(document.hidden));
 
   // ---------- Pengaman Sisi Klien ----------
   window.addEventListener("beforeunload", (e) => { if (S.aktif) { e.preventDefault(); e.returnValue = ""; } });
@@ -1089,6 +1243,13 @@
   }
 
   // ---------- Inisialisasi Event Listener ----------
+  $("btnTesSuara").addEventListener("click", () => {
+    aktifkanAudio();
+    if (!audioCtx || audioCtx.state === "closed") { modalOk("Audio tidak didukung", "Browser ini tidak mendukung bunyi peringatan. Gunakan Chrome atau Edge versi terbaru."); return; }
+    beepDuaKali();
+    $("cekSuara").disabled = false;
+    toast("Jika tidak terdengar: cek tombol mute, volume laptop, dan output suara.");
+  });
   $("btnMulai").addEventListener("click", mulaiKuis);
   $("btnKirim").addEventListener("click", konfirmasiKirim);
   $("btnPrev").addEventListener("click", () => pindahSoal(S.idx - 1));
